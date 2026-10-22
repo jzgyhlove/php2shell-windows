@@ -8,10 +8,12 @@ import csv
 import json
 import os
 import queue
+import re
 import sys
 import tempfile
 import threading
 import time
+import urllib.request
 import webbrowser
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -23,8 +25,20 @@ from tkinter import filedialog, font as tkfont, messagebox, ttk
 import scan_core
 
 APP_NAME = "PHP2Shell 批量检测工具"
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.3.0"
+PROJECT_URL = "https://github.com/jzgyhlove/php2shell-windows"
+RELEASES_URL = PROJECT_URL + "/releases/latest"
+LATEST_RELEASE_API = (
+    "https://api.github.com/repos/jzgyhlove/php2shell-windows/releases/latest"
+)
 SUSPICIOUS = set(scan_core.SUSPICIOUS_STATUSES)
+
+
+def version_tuple(text: str) -> tuple[int, int, int]:
+    numbers = [int(part) for part in re.findall(r"\d+", text or "")[:3]]
+    while len(numbers) < 3:
+        numbers.append(0)
+    return numbers[0], numbers[1], numbers[2]
 
 COLUMNS = (
     ("idx", "#", 54, "center", False),
@@ -189,6 +203,12 @@ class App:
             background=BG,
             foreground="#344054",
             font=(family, 10, "bold"),
+        )
+        style.configure(
+            "Link.TLabel",
+            background=BG,
+            foreground="#1570ef",
+            font=(family, 9, "underline"),
         )
         style.configure("TButton", padding=(10, 6), font=(family, 10))
         style.configure(
@@ -472,6 +492,12 @@ class App:
             text="判定仅供参考：版本被隐藏时用“增强识别”判断是否为 PHP，仍无法确定补丁版本。",
             style="Hint.TLabel",
         ).pack(side="right")
+        ttk.Button(footer, text="检查更新", command=self._check_update).pack(
+            side="right", padx=(8, 0)
+        )
+        link = ttk.Label(footer, text="项目主页", style="Link.TLabel", cursor="hand2")
+        link.pack(side="right", padx=(14, 0))
+        link.bind("<Button-1>", lambda _event: self._open_url(PROJECT_URL))
 
     def _center_window(self) -> None:
         self.root.update_idletasks()
@@ -877,6 +903,77 @@ class App:
         row = self._selected_row()
         if row and row.get("input"):
             webbrowser.open(row["input"])
+
+    def _open_url(self, url: str) -> None:
+        try:
+            webbrowser.open(url)
+        except Exception:
+            self._copy_text(url)
+            messagebox.showinfo("项目主页", f"已复制地址，请手动打开：\n{url}")
+
+    def _check_update(self) -> None:
+        self._update_checked: Any = None
+        self._update_summary("正在检查最新版本…")
+        threading.Thread(target=self._check_update_worker, daemon=True).start()
+        self.root.after(200, self._poll_update_check)
+
+    def _check_update_worker(self) -> None:
+        try:
+            request = urllib.request.Request(
+                LATEST_RELEASE_API,
+                headers={
+                    "User-Agent": f"php2shell-checker/{APP_VERSION}",
+                    "Accept": "application/vnd.github+json",
+                },
+            )
+            with urllib.request.urlopen(request, timeout=12) as response:
+                data = json.loads(response.read().decode("utf-8"))
+            tag = str(data.get("tag_name") or "").strip().lstrip("vV")
+            url = str(data.get("html_url") or "")
+            self._update_checked = (tag, url, None)
+        except Exception as exc:
+            self._update_checked = ("", "", exc)
+
+    def _poll_update_check(self) -> None:
+        result = getattr(self, "_update_checked", None)
+        if result is None:
+            self.root.after(200, self._poll_update_check)
+            return
+        self._update_checked = None
+        self._on_update_checked(*result)
+
+    def _on_update_checked(
+        self, tag: str, url: str, error: Exception | None
+    ) -> None:
+        if error is not None:
+            self._update_summary("检查更新失败，可点击“项目主页”手动查看")
+            if messagebox.askyesno(
+                "检查更新",
+                f"无法获取最新版本：{error}\n\n是否打开项目主页？",
+            ):
+                self._open_url(PROJECT_URL)
+            return
+        if not tag:
+            self._update_summary("未找到发行版本，可点击“项目主页”查看")
+            if messagebox.askyesno(
+                "检查更新",
+                f"仓库还没有发行版本。\n\n是否打开项目主页？",
+            ):
+                self._open_url(PROJECT_URL)
+            return
+        if version_tuple(tag) > version_tuple(APP_VERSION):
+            self._update_summary(f"发现新版本 v{tag}")
+            if messagebox.askyesno(
+                "发现新版本",
+                f"当前版本 v{APP_VERSION}，最新版本 v{tag}。\n\n是否打开发行页面下载？",
+            ):
+                self._open_url(url or RELEASES_URL)
+        else:
+            self._update_summary(f"已是最新版本 v{APP_VERSION}")
+            messagebox.showinfo(
+                "检查更新",
+                f"当前已是最新版本 v{APP_VERSION}。\n\n项目主页：{PROJECT_URL}",
+            )
 
     def _copy_text(self, text: str) -> None:
         try:

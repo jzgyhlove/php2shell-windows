@@ -21,7 +21,11 @@ php2shell (CVE-2026-109618 / CVE-2026-109619) 批量检测工具，Windows 图�
 
 ## 直接使用
 
-下载仓库根目录的 `PHP2Shell批量检测工具.exe`，双击运行，无需安装 Python。
+下载最新版：[Releases](https://github.com/jzgyhlove/php2shell-windows/releases/latest)（`php2shell_checker-x.y.z.exe`），双击运行，无需安装 Python。
+
+软件底部有“项目主页”和“检查更新”：
+- 点击“项目主页”直接在浏览器打开本仓库；
+- 点击“检查更新”自动对比 GitHub 最新发行版，有新版本时可直接跳转下载。
 
 1. 粘贴目标，点击“开始检测”
 2. 查看“判定”与“PHP识别”两列
@@ -54,6 +58,12 @@ python app.py --selftest # 本地自测
 ```
 
 构建产物位于 `dist\php2shell_checker.exe`。
+
+## 自动发布
+
+推送 `main` 或 `v*` 标签时，GitHub Actions 会自动执行自测、打包 exe，并发布到 [Releases](https://github.com/jzgyhlove/php2shell-windows/releases)。
+
+发新版本只需修改 `app.py` 里的 `APP_VERSION` 后推送，工作流会按该版本号创建对应的 tag 和发行版；版本号不变时则覆盖更新发行版中的 exe。
 
 ## 说明
 
