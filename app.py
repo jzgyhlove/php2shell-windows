@@ -22,10 +22,11 @@ from typing import Any
 import tkinter as tk
 from tkinter import filedialog, font as tkfont, messagebox, ttk
 
+import exploit_check
 import scan_core
 
 APP_NAME = "PHP2Shell 批量检测工具"
-APP_VERSION = "1.3.0"
+APP_VERSION = "1.4.0"
 PROJECT_URL = "https://github.com/jzgyhlove/php2shell-windows"
 RELEASES_URL = PROJECT_URL + "/releases/latest"
 LATEST_RELEASE_API = (
@@ -46,6 +47,7 @@ COLUMNS = (
     ("status", "判定", 110, "w", False),
     ("php_version", "PHP 版本", 100, "w", False),
     ("php_detected", "PHP识别", 92, "w", False),
+    ("exploit", "利用确认", 130, "w", False),
     ("http_status", "HTTP", 64, "center", False),
     ("server", "服务器", 130, "w", True),
     ("x_powered_by", "X-Powered-By", 160, "w", True),
@@ -474,6 +476,7 @@ class App:
         self.menu.add_command(label="查看详情", command=self._menu_details)
         self.menu.add_command(label="复制地址", command=self._menu_copy)
         self.menu.add_separator()
+        self.menu.add_command(label="利用确认（发送探测包）", command=self._exploit_selected)
         self.menu.add_command(label="在浏览器中打开", command=self._menu_open)
 
         footer = ttk.Frame(main)
@@ -487,6 +490,10 @@ class App:
         ttk.Button(footer, text="导出 JSONL", command=self._export_jsonl).pack(
             side="left", padx=(8, 0)
         )
+        self.exploit_button = ttk.Button(
+            footer, text="利用确认（选中）", command=self._exploit_selected
+        )
+        self.exploit_button.pack(side="left", padx=(16, 0))
         ttk.Label(
             footer,
             text="判定仅供参考：版本被隐藏时用“增强识别”判断是否为 PHP，仍无法确定补丁版本。",
@@ -788,6 +795,7 @@ class App:
             scan_core.STATUS_LABELS.get(row.get("status", ""), row.get("status", "")),
             row.get("php_version") or "-",
             scan_core.PHP_CONFIDENCE_LABELS.get(detected, detected or "-"),
+            row.get("exploit_label") or "未检测",
             row.get("http_status") or "-",
             row.get("server") or "-",
             row.get("x_powered_by") or "-",
@@ -811,6 +819,8 @@ class App:
                 return int(row.get("elapsed_ms") or 0)
             if col == "php_version":
                 return scan_core.version_sort_key(row.get("php_version"))
+            if col == "exploit":
+                return str(row.get("exploit_label") or "未检测")
             return str(row.get(col) or "").lower()
 
         rows.sort(key=key, reverse=self._sort_rev)
@@ -903,6 +913,83 @@ class App:
         row = self._selected_row()
         if row and row.get("input"):
             webbrowser.open(row["input"])
+
+    def _exploit_selected(self) -> None:
+        row = self._selected_row()
+        if row is None:
+            messagebox.showinfo("利用确认", "请先在列表中选中一个目标。")
+            return
+        if row.get("status") not in SUSPICIOUS and row.get("php_detected") not in (
+            "confirmed",
+            "likely",
+        ):
+            messagebox.showinfo(
+                "利用确认",
+                "只对“疑似/确认 PHP”的目标执行利用确认。",
+            )
+            return
+        url = str(row.get("target") or row.get("final_url") or row.get("input") or "")
+        if not url:
+            messagebox.showinfo("利用确认", "该目标没有可用的最终地址。")
+            return
+        if not messagebox.askyesno(
+            "利用确认",
+            f"即将对以下目标发送 multipart POST 探测：\n\n{url}\n\n"
+            "可能造成服务负载、连接中断或被安全设备记录。\n"
+            "仅限已获得授权的测试目标。\n\n确定继续？",
+            icon="warning",
+        ):
+            return
+
+        timeout = self._safe_int(self.timeout_var.get(), 10, 1, 120)
+        self._exploit_row = row
+        self._exploit_queue: queue.Queue = queue.Queue()
+        self.exploit_button.configure(state="disabled")
+        self._update_summary(f"正在进行利用确认：{url}")
+        threading.Thread(
+            target=self._exploit_worker,
+            args=(row, url, timeout),
+            daemon=True,
+        ).start()
+        self.root.after(200, self._poll_exploit)
+
+    def _exploit_worker(self, row: dict[str, Any], url: str, timeout: int) -> None:
+        result = exploit_check.verify_target(url, timeout=float(timeout), stall=1.0)
+        self._exploit_queue.put((row, result))
+        self._exploit_queue.put(None)
+
+    def _poll_exploit(self) -> None:
+        finished = False
+        updated: dict[str, Any] | None = None
+        while True:
+            try:
+                item = self._exploit_queue.get_nowait()
+            except queue.Empty:
+                break
+            if item is None:
+                finished = True
+                break
+            row, result = item
+            row.update(result)
+            updated = row
+            self._refresh_row(row)
+        if finished:
+            self.exploit_button.configure(state="normal")
+            self._update_summary()
+            if updated is not None:
+                messagebox.showinfo(
+                    "利用确认完成",
+                    f"{updated.get('exploit_label') or '未确认'}\n\n"
+                    f"{updated.get('exploit_detail') or ''}",
+                )
+            return
+        self.root.after(200, self._poll_exploit)
+
+    def _refresh_row(self, row: dict[str, Any]) -> None:
+        for iid, existing in self._iid_rows.items():
+            if existing is row:
+                self.tree.item(iid, values=self._row_values(row))
+                return
 
     def _open_url(self, url: str) -> None:
         try:
@@ -1002,6 +1089,8 @@ class App:
             f"版本来源：{row.get('php_version_source') or '未知'}",
             f"PHP 识别：{detected_label}",
             f"增强探测：{row.get('php_probes', 0)} 个附加请求",
+            f"利用确认：{row.get('exploit_label') or '未检测'}",
+            f"利用确认详情：{row.get('exploit_detail') or '-'}",
             f"HTTP 状态：{row.get('http_status') or '无响应'}",
             f"耗时：{row.get('elapsed_ms', 0)} ms",
             f"检测时间：{row.get('checked_at', '')}",
@@ -1029,6 +1118,7 @@ class App:
         lines.append("  PHP版本未知 = 确认/疑似为 PHP，但未暴露版本，无法判断补丁级别。")
         lines.append("  未发现PHP = 未发现 PHP 特征（CDN / expose_php=Off 可能漏判）。")
         lines.append("  EOL/未知 = 已停止维护分支或无法映射到修复版本。")
+        lines.append("  利用确认 = 发送 php2shell 618 multipart 探测；“原语确认”不等于完整 RCE。")
 
         text = tk.Text(
             win,
@@ -1141,6 +1231,8 @@ class App:
             "PHP版本",
             "PHP识别",
             "PHP识别依据",
+            "利用确认",
+            "利用确认详情",
             "版本来源",
             "HTTP状态",
             "服务器",
@@ -1166,6 +1258,8 @@ class App:
                         row.get("php_version") or "",
                         scan_core.PHP_CONFIDENCE_LABELS.get(detected, detected),
                         "; ".join(row.get("php_evidence") or []),
+                        row.get("exploit_label") or "未检测",
+                        row.get("exploit_detail") or "",
                         row.get("php_version_source") or "",
                         row.get("http_status") or "",
                         row.get("server") or "",
@@ -1263,6 +1357,19 @@ def run_selftest() -> int:
                 return
             status, headers, body = route
             self._send(status, headers, body)
+
+        def do_POST(self) -> None:
+            length = int(self.headers.get("Content-Length") or 0)
+            payload = self.rfile.read(length) if length else b""
+            match = re.search(rb'name="PHPSESSID"\r\n\r\n([^\r\n]+)', payload)
+            self.send_response(200)
+            if match:
+                session_id = match.group(1).decode("latin-1")
+                self.send_header("Set-Cookie", f"PHPSESSID={session_id}; path=/")
+            self.send_header("Content-Type", "text/plain")
+            self.send_header("Content-Length", "2")
+            self.end_headers()
+            self.wfile.write(b"ok")
 
         def log_message(self, *_args: Any) -> None:
             pass
@@ -1373,6 +1480,22 @@ def run_selftest() -> int:
         for name, passed in extra:
             ok = ok and passed
         rows.append({"path": "extra", "checks": [{"name": n, "pass": p} for n, p in extra]})
+        exploit_res = exploit_check.verify_target(
+            f"http://127.0.0.1:{port}/", timeout=5, stall=0.2
+        )
+        exploit_ok = (
+            exploit_res.get("exploit_status") == "session_fixation"
+            and exploit_res.get("exploit_success") is True
+        )
+        ok = ok and exploit_ok
+        rows.append(
+            {
+                "path": "exploit",
+                "expected": "session_fixation",
+                "pass": exploit_ok,
+                "row": exploit_res,
+            }
+        )
         normalized = scan_core.normalize_targets(
             "# comment\nexample.com\nhttps://example.com\nDOMAIN\nb.com,1.2.3.4\n"
         )

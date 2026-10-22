@@ -2,7 +2,7 @@
 
 php2shell (CVE-2026-109618 / CVE-2026-109619) 批量检测工具，Windows 图形界面，用于对大量站点做**被动指纹识别**，快速筛出 PHP 版本低于官方修复版本的疑似目标。
 
-> 本工具只发送普通 GET 请求做版本与 PHP 识别，不发送任何利用流量。
+> 默认扫描只发送普通 GET 请求；只有手动点击“利用确认”时，才会对该目标发送 multipart POST 探测。
 
 ## 功能
 
@@ -16,8 +16,9 @@ php2shell (CVE-2026-109618 / CVE-2026-109619) 批量检测工具，Windows 图�
 - 深度确认疑似（+2 请求/站）：
   - PATH_INFO 探测：`index.php/<随机>` 与 `index.html/<随机>` 对比，由 PHP 执行则为强证据
   - PHP session 缓存头（`Expires: Thu, 19 Nov 1981 08:52:00 GMT` 等）
+- 利用确认（手动、单个目标）：对疑似/确认 PHP 执行 php2shell 618 原语探测，输出“原语确认 / 未确认”等结论
 - 导出可疑 / 全部结果（CSV，Excel 可直接打开）、JSONL、复制地址
-- 结果详情展示版本来源、PHP 识别依据与全部证据
+- 结果详情展示版本来源、PHP 识别依据、利用确认与全部证据
 
 ## 直接使用
 
@@ -32,6 +33,22 @@ php2shell (CVE-2026-109618 / CVE-2026-109619) 批量检测工具，Windows 图�
 3. 点击“导出可疑/待复核 (CSV)”保存需要人工复核的目标
 
 默认设置：30 线程、超时 10 秒、重试 1 次。配置保存在 `%APPDATA%\php2shell-checker\settings.json`。
+
+## 利用确认
+
+在列表中选中疑似 / 确认 PHP 的目标，点击底部“利用确认（选中）”，或右键选择“利用确认（发送探测包）”。
+
+会向目标发送 php2shell 618 的 multipart POST 探测（stall + PHPSESSID 注入），约 4–6 个请求、数秒。
+
+| 结果 | 含义 |
+| --- | --- |
+| 原语确认（会话固定） | 服务器回写了我们提交的 PHPSESSID，利用原语成立（不等于完整 RCE） |
+| 疑似（崩溃信号） | 连接中断 / 502 / 503，可能触发崩溃，也可能是网络问题 |
+| 未确认（上传被接受） | PHP 接受了上传请求，但没有强信号 |
+| 未确认 | 未观察到有效信号 |
+| 无法访问 / 错误 | 网络或执行异常 |
+
+利用确认仅限已授权目标。完整 RCE 还需要目标二进制偏移（619）或实验室 monitor，本工具不执行。
 
 ## 判定说明
 
@@ -72,7 +89,7 @@ python app.py --selftest # 本地自测
 
 ## 致谢
 
-检测思路参考 [murrez/php2shell](https://github.com/murrez/php2shell)（MIT License）。
+检测思路与利用原语参考 [murrez/php2shell](https://github.com/murrez/php2shell)（MIT License）。其中 `php2shell_core.py`、`php2shell_exploit.py` 来自该仓库，许可见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 
 ## License
 
