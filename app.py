@@ -26,7 +26,7 @@ import exploit_check
 import scan_core
 
 APP_NAME = "PHP2Shell 批量检测工具"
-APP_VERSION = "1.4.0"
+APP_VERSION = "1.5.0"
 PROJECT_URL = "https://github.com/jzgyhlove/php2shell-windows"
 RELEASES_URL = PROJECT_URL + "/releases/latest"
 LATEST_RELEASE_API = (
@@ -476,7 +476,9 @@ class App:
         self.menu.add_command(label="查看详情", command=self._menu_details)
         self.menu.add_command(label="复制地址", command=self._menu_copy)
         self.menu.add_separator()
-        self.menu.add_command(label="利用确认（发送探测包）", command=self._exploit_selected)
+        self.menu.add_command(
+            label="利用确认（当前目标）", command=self._exploit_selected
+        )
         self.menu.add_command(label="在浏览器中打开", command=self._menu_open)
 
         footer = ttk.Frame(main)
@@ -491,7 +493,7 @@ class App:
             side="left", padx=(8, 0)
         )
         self.exploit_button = ttk.Button(
-            footer, text="利用确认（选中）", command=self._exploit_selected
+            footer, text="利用确认（全部）", command=self._exploit_all
         )
         self.exploit_button.pack(side="left", padx=(16, 0))
         ttk.Label(
@@ -914,53 +916,120 @@ class App:
         if row and row.get("input"):
             webbrowser.open(row["input"])
 
+    @staticmethod
+    def _row_url(row: dict[str, Any]) -> str:
+        return str(row.get("target") or row.get("final_url") or row.get("input") or "")
+
+    @staticmethod
+    def _is_php_row(row: dict[str, Any]) -> bool:
+        return row.get("status") in SUSPICIOUS or row.get("php_detected") in (
+            "confirmed",
+            "likely",
+        )
+
     def _exploit_selected(self) -> None:
         row = self._selected_row()
         if row is None:
             messagebox.showinfo("利用确认", "请先在列表中选中一个目标。")
             return
-        if row.get("status") not in SUSPICIOUS and row.get("php_detected") not in (
-            "confirmed",
-            "likely",
-        ):
+        if not self._is_php_row(row):
             messagebox.showinfo(
                 "利用确认",
                 "只对“疑似/确认 PHP”的目标执行利用确认。",
             )
             return
-        url = str(row.get("target") or row.get("final_url") or row.get("input") or "")
-        if not url:
-            messagebox.showinfo("利用确认", "该目标没有可用的最终地址。")
+        self._run_exploit([row])
+
+    def _exploit_all(self) -> None:
+        rows = [row for row in self._rows if self._is_php_row(row)]
+        if not rows:
+            messagebox.showinfo(
+                "利用确认",
+                "当前结果中没有“疑似/确认 PHP”的目标。",
+            )
             return
+        self._run_exploit(rows)
+
+    def _run_exploit(self, rows: list[dict[str, Any]]) -> None:
+        if self._running:
+            messagebox.showinfo("利用确认", "请等待当前检测完成后再进行利用确认。")
+            return
+        if getattr(self, "_exploit_running", False):
+            messagebox.showinfo("利用确认", "已有利用确认任务在运行，请等待完成。")
+            return
+        targets: list[dict[str, Any]] = []
+        for row in rows:
+            if not self._is_php_row(row):
+                continue
+            if not self._row_url(row):
+                continue
+            targets.append(row)
+        if not targets:
+            messagebox.showinfo("利用确认", "没有可执行利用确认的目标。")
+            return
+        if len(targets) == 1:
+            prompt = (
+                f"即将对以下目标发送 multipart POST 探测：\n\n{self._row_url(targets[0])}\n\n"
+            )
+        else:
+            prompt = f"即将对 {len(targets)} 个疑似/确认 PHP 目标发送 multipart POST 探测。\n\n"
         if not messagebox.askyesno(
             "利用确认",
-            f"即将对以下目标发送 multipart POST 探测：\n\n{url}\n\n"
-            "可能造成服务负载、连接中断或被安全设备记录。\n"
+            prompt
+            + "可能造成服务负载、连接中断或被安全设备记录。\n"
             "仅限已获得授权的测试目标。\n\n确定继续？",
             icon="warning",
         ):
             return
 
         timeout = self._safe_int(self.timeout_var.get(), 10, 1, 120)
-        self._exploit_row = row
+        self._exploit_rows = targets
+        self._exploit_total = len(targets)
+        self._exploit_done = 0
+        self._exploit_counts: dict[str, int] = {}
+        self._exploit_running = True
         self._exploit_queue: queue.Queue = queue.Queue()
         self.exploit_button.configure(state="disabled")
-        self._update_summary(f"正在进行利用确认：{url}")
+        self._update_summary(f"正在进行利用确认 0/{self._exploit_total}…")
         threading.Thread(
             target=self._exploit_worker,
-            args=(row, url, timeout),
+            args=(targets, timeout),
             daemon=True,
         ).start()
         self.root.after(200, self._poll_exploit)
 
-    def _exploit_worker(self, row: dict[str, Any], url: str, timeout: int) -> None:
-        result = exploit_check.verify_target(url, timeout=float(timeout), stall=1.0)
-        self._exploit_queue.put((row, result))
-        self._exploit_queue.put(None)
+    def _exploit_worker(
+        self, rows: list[dict[str, Any]], timeout: int
+    ) -> None:
+        try:
+            workers = min(3, len(rows))
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                futures = {
+                    pool.submit(
+                        exploit_check.verify_target,
+                        self._row_url(row),
+                        timeout=float(timeout),
+                        stall=1.0,
+                    ): row
+                    for row in rows
+                }
+                for future in as_completed(futures):
+                    row = futures[future]
+                    try:
+                        result = future.result()
+                    except Exception as exc:
+                        result = {
+                            "exploit_status": "error",
+                            "exploit_label": "错误",
+                            "exploit_detail": f"{type(exc).__name__}: {exc}",
+                            "exploit_success": False,
+                        }
+                    self._exploit_queue.put((row, result))
+        finally:
+            self._exploit_queue.put(None)
 
     def _poll_exploit(self) -> None:
         finished = False
-        updated: dict[str, Any] | None = None
         while True:
             try:
                 item = self._exploit_queue.get_nowait()
@@ -971,19 +1040,47 @@ class App:
                 break
             row, result = item
             row.update(result)
-            updated = row
+            label = str(row.get("exploit_label") or "未确认")
+            self._exploit_counts[label] = self._exploit_counts.get(label, 0) + 1
+            self._exploit_done += 1
             self._refresh_row(row)
+            self._update_summary(
+                f"利用确认 {self._exploit_done}/{self._exploit_total}…"
+            )
         if finished:
+            self._exploit_running = False
             self.exploit_button.configure(state="normal")
             self._update_summary()
-            if updated is not None:
-                messagebox.showinfo(
-                    "利用确认完成",
-                    f"{updated.get('exploit_label') or '未确认'}\n\n"
-                    f"{updated.get('exploit_detail') or ''}",
-                )
+            self._show_exploit_summary()
             return
         self.root.after(200, self._poll_exploit)
+
+    def _show_exploit_summary(self) -> None:
+        if self._exploit_total <= 1:
+            row = self._exploit_rows[0]
+            messagebox.showinfo(
+                "利用确认完成",
+                f"{row.get('exploit_label') or '未确认'}\n\n"
+                f"{row.get('exploit_detail') or ''}",
+            )
+            return
+        parts = [
+            f"{label}：{count}" for label, count in sorted(self._exploit_counts.items())
+        ]
+        lines = [f"共检测 {self._exploit_total} 个目标。", "", "\n".join(parts)]
+        confirmed = [
+            self._row_url(row)
+            for row in self._exploit_rows
+            if row.get("exploit_success")
+        ]
+        if confirmed:
+            lines.extend(
+                ["", f"原语确认（{len(confirmed)}）："]
+                + [f"  {url}" for url in confirmed[:10]]
+            )
+            if len(confirmed) > 10:
+                lines.append(f"  … 其余 {len(confirmed) - 10} 个见列表")
+        messagebox.showinfo("利用确认完成", "\n".join(lines))
 
     def _refresh_row(self, row: dict[str, Any]) -> None:
         for iid, existing in self._iid_rows.items():
