@@ -26,7 +26,7 @@ import exploit_check
 import scan_core
 
 APP_NAME = "PHP2Shell 批量检测工具"
-APP_VERSION = "1.6.0"
+APP_VERSION = "1.7.0"
 PROJECT_URL = "https://github.com/jzgyhlove/php2shell-windows"
 RELEASES_URL = PROJECT_URL + "/releases/latest"
 LATEST_RELEASE_API = (
@@ -56,8 +56,14 @@ COLUMNS = (
 
 FILTERS: dict[str, set[str] | None] = {
     "全部": None,
-    "可疑 (需复核)": {"likely_vulnerable", "branch_only", "php_no_version"},
+    "可疑 (需复核)": {
+        "likely_vulnerable",
+        "vendor_backport",
+        "branch_only",
+        "php_no_version",
+    },
     "疑似漏洞": {"likely_vulnerable"},
+    "回补待核": {"vendor_backport"},
     "分支未知": {"branch_only"},
     "PHP版本未知": {"php_no_version"},
     "已修复": {"patched"},
@@ -68,6 +74,7 @@ FILTERS: dict[str, set[str] | None] = {
 
 TAG_STYLES: dict[str, tuple[str, str]] = {
     "likely_vulnerable": ("#fee4e2", "#912018"),
+    "vendor_backport": ("#fffaeb", "#b54708"),
     "branch_only": ("#fef0c7", "#93370d"),
     "patched": ("#d1fadf", "#05603a"),
     "eol_or_unknown": ("#e4e7ec", "#344054"),
@@ -1410,6 +1417,11 @@ def run_selftest() -> int:
     routes = {
         "/vuln": (200, {"X-Powered-By": "PHP/8.4.20"}, "<html>ok</html>"),
         "/patched": (200, {"X-Powered-By": "PHP/8.4.27"}, "ok"),
+        "/distro": (
+            200,
+            {"X-Powered-By": "PHP/8.2.29-1+deb12u5"},
+            "ok",
+        ),
         "/branch": (200, {"X-Powered-By": "PHP/8.4"}, "ok"),
         "/none": (200, {"Server": "nginx"}, "hello"),
         "/body": (200, {}, "<meta name='generator' content='PHP/8.3.10'>"),
@@ -1560,6 +1572,26 @@ def run_selftest() -> int:
                 "expected": "unreachable",
                 "pass": dead_ok,
                 "row": dead,
+            }
+        )
+        distro = scan_core.check_target(
+            f"http://127.0.0.1:{port}/distro", timeout=5, retries=0
+        )
+        distro_ok = (
+            distro.get("status") == "vendor_backport"
+            and distro.get("php_version") == "8.2.29-1+deb12u5"
+            and any(
+                "第三方回补" in item for item in distro.get("php_evidence") or []
+            )
+        )
+        ok = ok and distro_ok
+        rows.append(
+            {
+                "path": "/distro",
+                "expected": "vendor_backport + 发行版后缀",
+                "expected_php": "confirmed",
+                "pass": distro_ok,
+                "row": distro,
             }
         )
         by_path = {r["path"]: r["row"] for r in rows}

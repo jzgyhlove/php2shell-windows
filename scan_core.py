@@ -45,6 +45,7 @@ MAX_REDIRECTS = 4
 
 STATUS_LABELS: dict[str, str] = {
     "likely_vulnerable": "疑似漏洞",
+    "vendor_backport": "回补待核",
     "branch_only": "分支未知",
     "php_no_version": "PHP版本未知",
     "patched": "已修复",
@@ -56,16 +57,22 @@ STATUS_LABELS: dict[str, str] = {
 
 STATUS_SEVERITY: dict[str, int] = {
     "likely_vulnerable": 0,
-    "branch_only": 1,
-    "php_no_version": 2,
-    "eol_or_unknown": 3,
-    "no_php_version": 4,
-    "patched": 5,
-    "unreachable": 6,
-    "error": 7,
+    "vendor_backport": 1,
+    "branch_only": 2,
+    "php_no_version": 3,
+    "eol_or_unknown": 4,
+    "no_php_version": 5,
+    "patched": 6,
+    "unreachable": 7,
+    "error": 8,
 }
 
-SUSPICIOUS_STATUSES = ("likely_vulnerable", "branch_only", "php_no_version")
+SUSPICIOUS_STATUSES = (
+    "likely_vulnerable",
+    "vendor_backport",
+    "branch_only",
+    "php_no_version",
+)
 
 PHP_CONFIDENCE_LABELS: dict[str, str] = {
     "confirmed": "确认PHP",
@@ -87,7 +94,9 @@ _SKIP_HEADERS = {
     "网站",
 }
 
-_PHP_RE = re.compile(r"PHP\s*/?\s*(\d+)\.(\d+)(?:\.(\d+))?", re.I)
+_PHP_RE = re.compile(
+    r"PHP\s*/?\s*(\d+)\.(\d+)(?:\.(\d+))?([-+~][0-9A-Za-z.+~_-]*)?", re.I
+)
 
 _HEADERS = {
     "User-Agent": USER_AGENT,
@@ -326,6 +335,8 @@ class ParsedPhpVersion:
     minor: int
     patch: int
     patch_known: bool
+    suffix: str = ""
+    raw: str = ""
 
     def as_tuple(self) -> tuple[int, int, int]:
         return self.major, self.minor, self.patch
@@ -334,6 +345,9 @@ class ParsedPhpVersion:
         if self.patch_known:
             return f"{self.major}.{self.minor}.{self.patch}"
         return f"{self.major}.{self.minor}.?"
+
+    def as_display(self) -> str:
+        return self.raw or self.as_str()
 
 
 def parse_php_version_detailed(text: str) -> ParsedPhpVersion | None:
@@ -348,7 +362,11 @@ def parse_php_version_detailed(text: str) -> ParsedPhpVersion | None:
     patch = int(m.group(3)) if patch_known else 0
     if not _is_plausible_php_version((major, minor, patch)):
         return None
-    return ParsedPhpVersion(major, minor, patch, patch_known)
+    suffix = m.group(4) or ""
+    base = f"{major}.{minor}.{patch}" if patch_known else f"{major}.{minor}"
+    return ParsedPhpVersion(
+        major, minor, patch, patch_known, suffix=suffix, raw=base + suffix
+    )
 
 
 def _is_plausible_php_version(ver: tuple[int, int, int]) -> bool:
@@ -388,6 +406,7 @@ def classify(
     php_version: str | None,
     patch_known: bool | None,
     likely_vulnerable: bool | None,
+    vendor_suffix: bool = False,
 ) -> str:
     if not http_status:
         return "unreachable"
@@ -396,7 +415,7 @@ def classify(
     if patch_known is False:
         return "branch_only"
     if likely_vulnerable is True:
-        return "likely_vulnerable"
+        return "vendor_backport" if vendor_suffix else "likely_vulnerable"
     if likely_vulnerable is False:
         return "patched"
     return "eol_or_unknown"
@@ -843,13 +862,28 @@ def check_target(
                     if parsed
                     else None
                 )
-                version_str = parsed.as_str() if parsed else None
+                version_str = parsed.as_display() if parsed else None
                 if parsed is not None:
-                    status_value = classify(status, version_str, patch_known, vuln)
+                    status_value = classify(
+                        status,
+                        version_str,
+                        patch_known,
+                        vuln,
+                        vendor_suffix=bool(parsed.suffix),
+                    )
                 elif php_detected in ("confirmed", "likely"):
                     status_value = "php_no_version"
                 else:
                     status_value = "no_php_version"
+
+                if parsed is not None and parsed.suffix:
+                    signals.append(
+                        (
+                            "medium",
+                            f"带后缀的构建 {parsed.as_display()}"
+                            "（常见于发行版打包，可能包含第三方回补，需核对发行版 changelog）",
+                        )
+                    )
 
                 evidence = _dedupe_evidence([text for _, text in signals])
 
