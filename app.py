@@ -26,7 +26,7 @@ import exploit_check
 import scan_core
 
 APP_NAME = "PHP2Shell 批量检测工具"
-APP_VERSION = "1.5.0"
+APP_VERSION = "1.6.0"
 PROJECT_URL = "https://github.com/jzgyhlove/php2shell-windows"
 RELEASES_URL = PROJECT_URL + "/releases/latest"
 LATEST_RELEASE_API = (
@@ -922,20 +922,25 @@ class App:
 
     @staticmethod
     def _is_php_row(row: dict[str, Any]) -> bool:
-        return row.get("status") in SUSPICIOUS or row.get("php_detected") in (
-            "confirmed",
-            "likely",
-        )
+        # 只对“疑似漏洞 / 分支未知 / PHP版本未知”做利用确认；
+        # 已修复（版本≥官方修复版本）的目标直接跳过，避免打补丁站点误报。
+        return row.get("status") in SUSPICIOUS
 
     def _exploit_selected(self) -> None:
         row = self._selected_row()
         if row is None:
             messagebox.showinfo("利用确认", "请先在列表中选中一个目标。")
             return
+        if row.get("status") == "patched":
+            messagebox.showinfo(
+                "利用确认",
+                f"该目标 PHP {row.get('php_version') or ''} 不低于官方修复版本，已跳过。",
+            )
+            return
         if not self._is_php_row(row):
             messagebox.showinfo(
                 "利用确认",
-                "只对“疑似/确认 PHP”的目标执行利用确认。",
+                "只对“疑似漏洞 / 分支未知 / PHP版本未知”的目标执行利用确认。",
             )
             return
         self._run_exploit([row])
@@ -1010,6 +1015,8 @@ class App:
                         self._row_url(row),
                         timeout=float(timeout),
                         stall=1.0,
+                        php_version=row.get("php_version"),
+                        patched=row.get("status") == "patched",
                     ): row
                     for row in rows
                 }
@@ -1075,7 +1082,7 @@ class App:
         ]
         if confirmed:
             lines.extend(
-                ["", f"原语确认（{len(confirmed)}）："]
+                ["", f"确认命中（{len(confirmed)}）："]
                 + [f"  {url}" for url in confirmed[:10]]
             )
             if len(confirmed) > 10:
@@ -1582,15 +1589,35 @@ def run_selftest() -> int:
         )
         exploit_ok = (
             exploit_res.get("exploit_status") == "session_fixation"
-            and exploit_res.get("exploit_success") is True
+            and exploit_res.get("exploit_success") is False
         )
         ok = ok and exploit_ok
         rows.append(
             {
                 "path": "exploit",
-                "expected": "session_fixation",
+                "expected": "session_fixation (not success)",
                 "pass": exploit_ok,
                 "row": exploit_res,
+            }
+        )
+        skip_res = exploit_check.verify_target(
+            f"http://127.0.0.1:{port}/",
+            timeout=5,
+            stall=0.2,
+            php_version="8.4.27",
+            patched=True,
+        )
+        skip_ok = (
+            skip_res.get("exploit_status") == "skipped_patched"
+            and skip_res.get("exploit_attempts") == 0
+        )
+        ok = ok and skip_ok
+        rows.append(
+            {
+                "path": "exploit skip patched",
+                "expected": "skipped_patched",
+                "pass": skip_ok,
+                "row": skip_res,
             }
         )
         normalized = scan_core.normalize_targets(

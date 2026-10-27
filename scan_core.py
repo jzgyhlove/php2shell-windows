@@ -794,18 +794,30 @@ def check_target(
                 probe_ok = 0
                 probe_total = 0
 
-                if parsed is None and enhanced and status not in (429,):
+                if (
+                    enhanced
+                    and status not in (429,)
+                    and (parsed is None or source == "body")
+                ):
                     probe = _probe_php(final_url, (status, body, headers), timeout)
                     probe_ok = int(probe["ok"])
                     probe_total = int(probe["total"])
                     signals.extend(probe["signals"])
                     if probe["version"] is not None:
-                        parsed = probe["version"]
-                        source = str(probe["version_source"])
-                        if probe["headers"].get("x-powered-by") and not powered:
-                            powered = probe["headers"]["x-powered-by"]
+                        probe_source = str(probe["version_source"])
+                        # 正文版本可信度低；若探针拿到 header/server 版本则优先采用。
+                        if (
+                            parsed is None
+                            or "header" in probe_source
+                            or "server" in probe_source
+                        ):
+                            parsed = probe["version"]
+                            source = probe_source
                     if probe["headers"].get("x-powered-by") and not powered:
                         powered = probe["headers"]["x-powered-by"]
+
+                if parsed is not None and source.endswith("body"):
+                    signals.append(("medium", "PHP 版本来自响应正文（可信度较低）"))
 
                 if parsed is not None:
                     php_detected = "confirmed"
